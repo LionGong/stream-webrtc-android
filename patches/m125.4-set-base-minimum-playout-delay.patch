@@ -1,0 +1,171 @@
+diff --git a/api/rtp_receiver_interface.h b/api/rtp_receiver_interface.h
+index 0bf1af972b..ec0a5a55f2 100644
+--- a/api/rtp_receiver_interface.h
++++ b/api/rtp_receiver_interface.h
+@@ -90,6 +90,15 @@ class RTC_EXPORT RtpReceiverInterface : public webrtc::RefCountInterface {
+   virtual void SetJitterBufferMinimumDelay(
+       absl::optional<double> delay_seconds) = 0;
+ 
++  // Base-minimum playout delay (NetEq floor), milliseconds.
++  // m125 has no Call::SetBaseMinimumPlayoutDelayMs; the PC equivalent is
++  // VoiceMediaReceiveChannel::SetBaseMinimumPlayoutDelayMs(ssrc, delay_ms),
++  // reached from AudioRtpReceiver. Video receivers keep this default and
++  // return false. Does not call SetMinimumDelay.
++  virtual bool SetBaseMinimumPlayoutDelayMs(int delay_ms) { return false; }
++  // Current base minimum in ms, or -1 when no audio receive stream is up.
++  virtual int GetBaseMinimumPlayoutDelayMs() { return -1; }
++
+   // TODO(zhihuang): Remove the default implementation once the subclasses
+   // implement this. Currently, the only relevant subclass is the
+   // content::FakeRtpReceiver in Chromium.
+diff --git a/pc/audio_rtp_receiver.cc b/pc/audio_rtp_receiver.cc
+index ae879ddb1b..60d0dabf8b 100644
+--- a/pc/audio_rtp_receiver.cc
++++ b/pc/audio_rtp_receiver.cc
+@@ -313,6 +313,54 @@ void AudioRtpReceiver::SetObserver(RtpReceiverObserverInterface* observer) {
+   }
+ }
+ 
++bool AudioRtpReceiver::SetBaseMinimumPlayoutDelayMs(int delay_ms) {
++  if (!worker_thread_->IsCurrent()) {
++    return worker_thread_->BlockingCall([this, delay_ms] {
++      return SetBaseMinimumPlayoutDelayMs(delay_ms);
++    });
++  }
++  RTC_DCHECK_RUN_ON(worker_thread_);
++  // NetEq rejects values outside 0..10000. Do not clamp into a different
++  // delay and report success, and do not call SetMinimumDelay.
++  if (delay_ms < 0 || delay_ms > 10000) {
++    return false;
++  }
++  absl::optional<uint32_t> ssrc = signaled_ssrc_;
++  if (media_channel_ && !ssrc.has_value()) {
++    ssrc = media_channel_->GetUnsignaledSsrc();
++  }
++  if (!media_channel_ || !ssrc.has_value()) {
++    // Cache so RestartMediaChannel_w applies this floor when the stream
++    // appears. The call has not reached a receive stream, so return false.
++    delay_.Set(static_cast<double>(delay_ms) / 1000.0);
++    return false;
++  }
++  const bool applied =
++      media_channel_->SetBaseMinimumPlayoutDelayMs(*ssrc, delay_ms);
++  if (applied) {
++    delay_.Set(static_cast<double>(delay_ms) / 1000.0);
++  }
++  return applied;
++}
++
++int AudioRtpReceiver::GetBaseMinimumPlayoutDelayMs() {
++  if (!worker_thread_->IsCurrent()) {
++    return worker_thread_->BlockingCall(
++        [this] { return GetBaseMinimumPlayoutDelayMs(); });
++  }
++  RTC_DCHECK_RUN_ON(worker_thread_);
++  absl::optional<uint32_t> ssrc = signaled_ssrc_;
++  if (media_channel_ && !ssrc.has_value()) {
++    ssrc = media_channel_->GetUnsignaledSsrc();
++  }
++  if (!media_channel_ || !ssrc.has_value()) {
++    return -1;
++  }
++  absl::optional<int> delay_ms =
++      media_channel_->GetBaseMinimumPlayoutDelayMs(*ssrc);
++  return delay_ms.value_or(-1);
++}
++
+ void AudioRtpReceiver::SetJitterBufferMinimumDelay(
+     absl::optional<double> delay_seconds) {
+   RTC_DCHECK_RUN_ON(worker_thread_);
+diff --git a/pc/audio_rtp_receiver.h b/pc/audio_rtp_receiver.h
+index 36cbdffc35..2d2760a051 100644
+--- a/pc/audio_rtp_receiver.h
++++ b/pc/audio_rtp_receiver.h
+@@ -112,6 +112,9 @@ class AudioRtpReceiver : public ObserverInterface,
+   void SetJitterBufferMinimumDelay(
+       absl::optional<double> delay_seconds) override;
+ 
++  bool SetBaseMinimumPlayoutDelayMs(int delay_ms) override;
++  int GetBaseMinimumPlayoutDelayMs() override;
++
+   void SetMediaChannel(
+       cricket::MediaReceiveChannelInterface* media_channel) override;
+ 
+diff --git a/sdk/android/api/org/webrtc/RtpReceiver.java b/sdk/android/api/org/webrtc/RtpReceiver.java
+index c3cff3dd31..856936443a 100644
+--- a/sdk/android/api/org/webrtc/RtpReceiver.java
++++ b/sdk/android/api/org/webrtc/RtpReceiver.java
+@@ -81,6 +81,29 @@ public class RtpReceiver {
+     nativeSetFrameDecryptor(nativeRtpReceiver, frameDecryptor.getNativeFrameDecryptor());
+   }
+ 
++  /**
++   * Sets the base minimum playout delay (NetEq floor) for this audio receiver, in milliseconds.
++   *
++   * <p>Forwards to the native voice receive channel {@code SetBaseMinimumPlayoutDelayMs(ssrc,
++   * delayMs)}, which is the m125 equivalent of {@code Call::SetBaseMinimumPlayoutDelayMs}. Returns
++   * {@code false} for a non-audio receiver, when no receive stream is up yet, or when the native
++   * call fails. A {@code false} return is propagated and is not treated as success. This method
++   * does not call {@code SetMinimumDelay}.
++   */
++  public boolean setBaseMinimumPlayoutDelayMs(int delayMs) {
++    checkRtpReceiverExists();
++    return nativeSetBaseMinimumPlayoutDelayMs(nativeRtpReceiver, delayMs);
++  }
++
++  /**
++   * Returns the current base minimum playout delay in milliseconds, or {@code -1} when no audio
++   * receive stream is available.
++   */
++  public int getBaseMinimumPlayoutDelayMs() {
++    checkRtpReceiverExists();
++    return nativeGetBaseMinimumPlayoutDelayMs(nativeRtpReceiver);
++  }
++
+   private void checkRtpReceiverExists() {
+     if (nativeRtpReceiver == 0) {
+       throw new IllegalStateException("RtpReceiver has been disposed.");
+@@ -95,4 +118,6 @@ public class RtpReceiver {
+   private static native long nativeSetObserver(long rtpReceiver, Observer observer);
+   private static native void nativeUnsetObserver(long rtpReceiver, long nativeObserver);
+   private static native void nativeSetFrameDecryptor(long rtpReceiver, long nativeFrameDecryptor);
++  private static native boolean nativeSetBaseMinimumPlayoutDelayMs(long rtpReceiver, int delayMs);
++  private static native int nativeGetBaseMinimumPlayoutDelayMs(long rtpReceiver);
+ };
+diff --git a/sdk/android/src/jni/pc/rtp_receiver.cc b/sdk/android/src/jni/pc/rtp_receiver.cc
+index 7a3600b424..15cc634f6d 100644
+--- a/sdk/android/src/jni/pc/rtp_receiver.cc
++++ b/sdk/android/src/jni/pc/rtp_receiver.cc
+@@ -10,6 +10,8 @@
+ 
+ #include "sdk/android/src/jni/pc/rtp_receiver.h"
+ 
++#include "api/rtp_receiver_interface.h"
++
+ #include "sdk/android/generated_peerconnection_jni/RtpReceiver_jni.h"
+ #include "sdk/android/native_api/jni/java_types.h"
+ #include "sdk/android/src/jni/jni_helpers.h"
+@@ -123,5 +125,23 @@ static void JNI_RtpReceiver_SetFrameDecryptor(JNIEnv* jni,
+               j_frame_decryptor_pointer)));
+ }
+ 
++static jboolean JNI_RtpReceiver_SetBaseMinimumPlayoutDelayMs(
++    JNIEnv* jni,
++    jlong j_rtp_receiver_pointer,
++    jint delay_ms) {
++  auto* receiver =
++      reinterpret_cast<RtpReceiverInterface*>(j_rtp_receiver_pointer);
++  return receiver->SetBaseMinimumPlayoutDelayMs(delay_ms) ? JNI_TRUE
++                                                          : JNI_FALSE;
++}
++
++static jint JNI_RtpReceiver_GetBaseMinimumPlayoutDelayMs(
++    JNIEnv* jni,
++    jlong j_rtp_receiver_pointer) {
++  auto* receiver =
++      reinterpret_cast<RtpReceiverInterface*>(j_rtp_receiver_pointer);
++  return receiver->GetBaseMinimumPlayoutDelayMs();
++}
++
+ }  // namespace jni
+ }  // namespace webrtc

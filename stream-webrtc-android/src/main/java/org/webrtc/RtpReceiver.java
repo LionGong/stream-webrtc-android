@@ -81,6 +81,29 @@ public class RtpReceiver {
     nativeSetFrameDecryptor(nativeRtpReceiver, frameDecryptor.getNativeFrameDecryptor());
   }
 
+  /**
+   * Sets the base minimum playout delay (NetEq floor) for this audio receiver, in milliseconds.
+   *
+   * <p>Forwards to the native voice receive channel {@code SetBaseMinimumPlayoutDelayMs(ssrc,
+   * delayMs)}, which is the m125 equivalent of {@code Call::SetBaseMinimumPlayoutDelayMs}. Returns
+   * {@code false} for a non-audio receiver, when no receive stream is up yet, or when the native
+   * call fails. A {@code false} return is propagated and is not treated as success. This method
+   * does not call {@code SetMinimumDelay}.
+   */
+  public boolean setBaseMinimumPlayoutDelayMs(int delayMs) {
+    checkRtpReceiverExists();
+    return nativeSetBaseMinimumPlayoutDelayMs(nativeRtpReceiver, delayMs);
+  }
+
+  /**
+   * Returns the current base minimum playout delay in milliseconds, or {@code -1} when no audio
+   * receive stream is available.
+   */
+  public int getBaseMinimumPlayoutDelayMs() {
+    checkRtpReceiverExists();
+    return nativeGetBaseMinimumPlayoutDelayMs(nativeRtpReceiver);
+  }
+
   private void checkRtpReceiverExists() {
     if (nativeRtpReceiver == 0) {
       throw new IllegalStateException("RtpReceiver has been disposed.");
@@ -95,4 +118,6 @@ public class RtpReceiver {
   private static native long nativeSetObserver(long rtpReceiver, Observer observer);
   private static native void nativeUnsetObserver(long rtpReceiver, long nativeObserver);
   private static native void nativeSetFrameDecryptor(long rtpReceiver, long nativeFrameDecryptor);
+  private static native boolean nativeSetBaseMinimumPlayoutDelayMs(long rtpReceiver, int delayMs);
+  private static native int nativeGetBaseMinimumPlayoutDelayMs(long rtpReceiver);
 };
