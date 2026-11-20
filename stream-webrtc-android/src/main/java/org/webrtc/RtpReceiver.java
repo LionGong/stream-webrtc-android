@@ -84,11 +84,13 @@ public class RtpReceiver {
   /**
    * Sets the base minimum playout delay (NetEq floor) for this audio receiver, in milliseconds.
    *
-   * <p>Forwards to the native voice receive channel {@code SetBaseMinimumPlayoutDelayMs(ssrc,
-   * delayMs)}, which is the m125 equivalent of {@code Call::SetBaseMinimumPlayoutDelayMs}. Returns
-   * {@code false} for a non-audio receiver, when no receive stream is up yet, or when the native
-   * call fails. A {@code false} return is propagated and is not treated as success. This method
-   * does not call {@code SetMinimumDelay}.
+   * <p>The Java receiver pointer is the {@code RtpReceiver} proxy. The call is forwarded on the
+   * worker thread to {@code AudioRtpReceiver}, then to the voice receive channel {@code
+   * SetBaseMinimumPlayoutDelayMs(ssrc, delayMs)} (the m125 equivalent of {@code
+   * Call::SetBaseMinimumPlayoutDelayMs}). If no SSRC is known yet, ssrc 0 sets the channel's
+   * default for the unsignaled receive stream. Returns {@code false} for a non-audio receiver, a
+   * delay outside 0..10000, a missing media channel, or a channel rejection. A {@code false}
+   * return is propagated. This method does not call {@code SetMinimumDelay}.
    */
   public boolean setBaseMinimumPlayoutDelayMs(int delayMs) {
     checkRtpReceiverExists();

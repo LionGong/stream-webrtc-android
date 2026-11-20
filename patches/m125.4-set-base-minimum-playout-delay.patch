@@ -19,10 +19,10 @@ index 0bf1af972b..ec0a5a55f2 100644
    // implement this. Currently, the only relevant subclass is the
    // content::FakeRtpReceiver in Chromium.
 diff --git a/pc/audio_rtp_receiver.cc b/pc/audio_rtp_receiver.cc
-index ae879ddb1b..60d0dabf8b 100644
+index ae879ddb1b..02bf0a3dfc 100644
 --- a/pc/audio_rtp_receiver.cc
 +++ b/pc/audio_rtp_receiver.cc
-@@ -313,6 +313,54 @@ void AudioRtpReceiver::SetObserver(RtpReceiverObserverInterface* observer) {
+@@ -313,6 +313,61 @@ void AudioRtpReceiver::SetObserver(RtpReceiverObserverInterface* observer) {
    }
  }
  
@@ -38,22 +38,24 @@ index ae879ddb1b..60d0dabf8b 100644
 +  if (delay_ms < 0 || delay_ms > 10000) {
 +    return false;
 +  }
-+  absl::optional<uint32_t> ssrc = signaled_ssrc_;
-+  if (media_channel_ && !ssrc.has_value()) {
-+    ssrc = media_channel_->GetUnsignaledSsrc();
-+  }
-+  if (!media_channel_ || !ssrc.has_value()) {
-+    // Cache so RestartMediaChannel_w applies this floor when the stream
-+    // appears. The call has not reached a receive stream, so return false.
-+    delay_.Set(static_cast<double>(delay_ms) / 1000.0);
++  // Cache so a later signaled RestartMediaChannel_w reapplies this floor
++  // instead of the default 0. The unsignaled first-packet path does not read
++  // this cache; it reads the channel default set below with ssrc 0.
++  delay_.Set(static_cast<double>(delay_ms) / 1000.0);
++  if (!media_channel_) {
 +    return false;
 +  }
-+  const bool applied =
-+      media_channel_->SetBaseMinimumPlayoutDelayMs(*ssrc, delay_ms);
-+  if (applied) {
-+    delay_.Set(static_cast<double>(delay_ms) / 1000.0);
++  absl::optional<uint32_t> ssrc = signaled_ssrc_;
++  if (!ssrc.has_value()) {
++    ssrc = media_channel_->GetUnsignaledSsrc();
 +  }
-+  return applied;
++  if (!ssrc.has_value()) {
++    // ssrc 0 is the channel's default receive stream. It stores
++    // default_recv_base_minimum_delay_ms_ and applies that value when the
++    // unsignaled stream is created. An empty unsignaled set returns true.
++    return media_channel_->SetBaseMinimumPlayoutDelayMs(0, delay_ms);
++  }
++  return media_channel_->SetBaseMinimumPlayoutDelayMs(*ssrc, delay_ms);
 +}
 +
 +int AudioRtpReceiver::GetBaseMinimumPlayoutDelayMs() {
@@ -66,8 +68,13 @@ index ae879ddb1b..60d0dabf8b 100644
 +  if (media_channel_ && !ssrc.has_value()) {
 +    ssrc = media_channel_->GetUnsignaledSsrc();
 +  }
-+  if (!media_channel_ || !ssrc.has_value()) {
++  if (!media_channel_) {
 +    return -1;
++  }
++  if (!ssrc.has_value()) {
++    absl::optional<int> delay_ms =
++        media_channel_->GetBaseMinimumPlayoutDelayMs(0);
++    return delay_ms.value_or(-1);
 +  }
 +  absl::optional<int> delay_ms =
 +      media_channel_->GetBaseMinimumPlayoutDelayMs(*ssrc);
@@ -91,22 +98,40 @@ index 36cbdffc35..2d2760a051 100644
    void SetMediaChannel(
        cricket::MediaReceiveChannelInterface* media_channel) override;
  
+diff --git a/pc/rtp_receiver_proxy.h b/pc/rtp_receiver_proxy.h
+index d4114e0f0b..cf308c5ec2 100644
+--- a/pc/rtp_receiver_proxy.h
++++ b/pc/rtp_receiver_proxy.h
+@@ -36,6 +36,11 @@ PROXY_METHOD1(void, SetObserver, RtpReceiverObserverInterface*)
+ PROXY_SECONDARY_METHOD1(void,
+                         SetJitterBufferMinimumDelay,
+                         absl::optional<double>)
++// Worker thread, same as SetJitterBufferMinimumDelay. Without these entries
++// the proxy keeps RtpReceiverInterface's default (false / -1) and the Java
++// pointer, which is the proxy, never reaches AudioRtpReceiver.
++PROXY_SECONDARY_METHOD1(bool, SetBaseMinimumPlayoutDelayMs, int)
++PROXY_SECONDARY_METHOD0(int, GetBaseMinimumPlayoutDelayMs)
+ PROXY_SECONDARY_CONSTMETHOD0(std::vector<RtpSource>, GetSources)
+ // TODO(bugs.webrtc.org/12772): Remove.
+ PROXY_SECONDARY_METHOD1(void,
 diff --git a/sdk/android/api/org/webrtc/RtpReceiver.java b/sdk/android/api/org/webrtc/RtpReceiver.java
-index c3cff3dd31..856936443a 100644
+index c3cff3dd31..746566958e 100644
 --- a/sdk/android/api/org/webrtc/RtpReceiver.java
 +++ b/sdk/android/api/org/webrtc/RtpReceiver.java
-@@ -81,6 +81,29 @@ public class RtpReceiver {
+@@ -81,6 +81,31 @@ public class RtpReceiver {
      nativeSetFrameDecryptor(nativeRtpReceiver, frameDecryptor.getNativeFrameDecryptor());
    }
  
 +  /**
 +   * Sets the base minimum playout delay (NetEq floor) for this audio receiver, in milliseconds.
 +   *
-+   * <p>Forwards to the native voice receive channel {@code SetBaseMinimumPlayoutDelayMs(ssrc,
-+   * delayMs)}, which is the m125 equivalent of {@code Call::SetBaseMinimumPlayoutDelayMs}. Returns
-+   * {@code false} for a non-audio receiver, when no receive stream is up yet, or when the native
-+   * call fails. A {@code false} return is propagated and is not treated as success. This method
-+   * does not call {@code SetMinimumDelay}.
++   * <p>The Java receiver pointer is the {@code RtpReceiver} proxy. The call is forwarded on the
++   * worker thread to {@code AudioRtpReceiver}, then to the voice receive channel {@code
++   * SetBaseMinimumPlayoutDelayMs(ssrc, delayMs)} (the m125 equivalent of {@code
++   * Call::SetBaseMinimumPlayoutDelayMs}). If no SSRC is known yet, ssrc 0 sets the channel's
++   * default for the unsignaled receive stream. Returns {@code false} for a non-audio receiver, a
++   * delay outside 0..10000, a missing media channel, or a channel rejection. A {@code false}
++   * return is propagated. This method does not call {@code SetMinimumDelay}.
 +   */
 +  public boolean setBaseMinimumPlayoutDelayMs(int delayMs) {
 +    checkRtpReceiverExists();
@@ -125,7 +150,7 @@ index c3cff3dd31..856936443a 100644
    private void checkRtpReceiverExists() {
      if (nativeRtpReceiver == 0) {
        throw new IllegalStateException("RtpReceiver has been disposed.");
-@@ -95,4 +118,6 @@ public class RtpReceiver {
+@@ -95,4 +120,6 @@ public class RtpReceiver {
    private static native long nativeSetObserver(long rtpReceiver, Observer observer);
    private static native void nativeUnsetObserver(long rtpReceiver, long nativeObserver);
    private static native void nativeSetFrameDecryptor(long rtpReceiver, long nativeFrameDecryptor);

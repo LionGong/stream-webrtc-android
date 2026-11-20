@@ -105,3 +105,39 @@ x86_64
 Unstripped arm64 also contains `webrtc::AudioRtpReceiver::SetBaseMinimumPlayoutDelayMs(int)`.
 
 There is no `Java_org_webrtc_RtpReceiver_nativeSetMinimumDelay` symbol.
+
+## Live-window false return (2026-11-21) and rebuild
+
+Host APK on JDY-AN00 (Asia/Shanghai), AAR sha256 `46d601b2…` from the section above, called `setBaseMinimumPlayoutDelayMs(100)` from `onAddTrack`. Both sessions logged `audio_jb_base_minimum_api=rejected gap=base_minimum_returned_false`. `api_missing_on_stack` was 0. `audio_jb_floor_set` never appeared. This VM has no device, so this note does not record a live-window pass.
+
+Cause, in this repo's native patch: the Java `RtpReceiver` pointer is `RtpReceiverProxyWithInternal`, and `OnAddTrack` hands that proxy to Java (`sdp_offer_answer.cc`). The proxy only forwards methods listed in `pc/rtp_receiver_proxy.h`. `SetBaseMinimumPlayoutDelayMs` was not listed, so the call hit `RtpReceiverInterface`'s default `return false` and never entered `AudioRtpReceiver`. The receiver delay cache stayed 0, so a later stream start also did not pick up 100 ms.
+
+Fix, still not `SetMinimumDelay`:
+
+- Proxy forwards `SetBaseMinimumPlayoutDelayMs` and `GetBaseMinimumPlayoutDelayMs` on the worker thread, same as `SetJitterBufferMinimumDelay`.
+- `AudioRtpReceiver` caches the delay for a later signaled restart. If no SSRC is known, it calls the channel with ssrc 0, which is that channel's default receive stream (`default_recv_base_minimum_delay_ms_`, applied when the unsignaled stream is created). A channel `false` is still returned as `false`.
+
+Rebuilt on this Cloud VM at 2026-11-20T16:53:39Z from the same GetStream/webrtc commit `4655e557d1206a42899b6b03fbf017fc64c654cc`. `versionName` stays 1.3.10.
+
+New AAR sha256:
+
+```
+7a3121cc46c4058277f5afb556b0bca86510ebf2933cd8f72a233047526034e8  stream-webrtc-android-release.aar
+```
+
+arm64 SO sha256 (inside that AAR):
+
+```
+e62a5d9b9b2588593ebd1c39a97c24b0e0ea166d58944e72397099589cd4580e  jni/arm64-v8a/libjingle_peerconnection_so.so
+```
+
+Other inner hashes:
+
+```
+596114d6ee0e5e5d6df73e5144d5506d0ba487de3a9896ce794caad6d47d87c2  classes.jar
+86614fe1ab2bea463c0fdf7f13591bbc44f113ac47b7bc4ee20faca41dc4667a  jni/armeabi-v7a/libjingle_peerconnection_so.so
+e3349e57935f19433f92886ac59c09593453583f208ffa6d5b801477d1768999  jni/x86/libjingle_peerconnection_so.so
+9505161d4a8a034fd34537063f665c3dc14ac7757f1b3c584774b06a2512802a  jni/x86_64/libjingle_peerconnection_so.so
+```
+
+`javap -public` still shows `public boolean setBaseMinimumPlayoutDelayMs(int)` and `public int getBaseMinimumPlayoutDelayMs()`. `nm -D` on all four AAR SOs still has both `Java_org_webrtc_RtpReceiver_nativeSetBaseMinimumPlayoutDelayMs` and `Java_org_webrtc_RtpReceiver_nativeGetBaseMinimumPlayoutDelayMs`. Unstripped arm64 also has `webrtc::RtpReceiverProxyWithInternal<webrtc::RtpReceiverInternal>::SetBaseMinimumPlayoutDelayMs(int)`. No `nativeSetMinimumDelay` JNI symbol.
