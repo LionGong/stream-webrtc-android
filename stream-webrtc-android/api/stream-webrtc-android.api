@@ -1531,8 +1531,10 @@ public class org/webrtc/RtpReceiver {
 	public fun <init> (J)V
 	public fun SetObserver (Lorg/webrtc/RtpReceiver$Observer;)V
 	public fun dispose ()V
+	public fun getBaseMinimumPlayoutDelayMs ()I
 	public fun getParameters ()Lorg/webrtc/RtpParameters;
 	public fun id ()Ljava/lang/String;
+	public fun setBaseMinimumPlayoutDelayMs (I)Z
 	public fun setFrameDecryptor (Lorg/webrtc/FrameDecryptor;)V
 	public fun track ()Lorg/webrtc/MediaStreamTrack;
 }
